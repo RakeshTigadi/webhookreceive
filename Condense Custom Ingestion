@@ -1,0 +1,78 @@
+import os
+import json
+from flask import Flask, request, jsonify
+from confluent_kafka import Producer
+import datetime
+
+app = Flask(__name__)
+
+# --- Kafka Configuration (Matching your Condense Env) ---
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "my-cluster-kafka-bootstrap.kafka.svc:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "pms-events-ingest")
+KAFKA_USERNAME = os.getenv("KAFKA_USERNAME", "otqblgf5y1arpk2f9e63nt8k9")
+KAFKA_PASSWORD = os.getenv("KAFKA_PASSWORD", "VBOG9g36ZxZP66RSxuTDzLDZvA8rW9U3")
+
+# Kafka Producer Setup
+producer_config = {
+    'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
+}
+
+if KAFKA_USERNAME and KAFKA_PASSWORD:
+    producer_config.update({
+        "security.protocol": "SASL_PLAINTEXT",
+        "sasl.mechanism": "SCRAM-SHA-512",
+        "sasl.username": KAFKA_USERNAME,
+        "sasl.password": KAFKA_PASSWORD,
+    })
+
+producer = Producer(producer_config)
+
+def delivery_report(err, msg):
+    if err is not None:
+        print(f"❌ Message delivery failed: {err}")
+    else:
+        print(f"✅ Message delivered to {msg.topic()} [{msg.partition()}]")
+
+@app.route('/ingest', methods=['POST'])
+def ingest_data():
+    """
+    Endpoint for the HTML Application to push business card data.
+    """
+    try:
+        payload = request.get_json()
+        
+        if not payload:
+            return jsonify({"status": "error", "message": "No payload received"}), 400
+
+        # Add metadata for the pipeline
+        payload['ingestion_timestamp'] = datetime.datetime.utcnow().isoformat()
+        payload['source'] = "html_scanner_v3"
+
+        # Push to Kafka Topic for the rest of the Condense Pipeline to consume
+        producer.produce(
+            KAFKA_TOPIC, 
+            key=str(payload.get('connector_id', 'anonymous')), 
+            value=json.dumps(payload).encode('utf-8'),
+            callback=delivery_report
+        )
+        producer.flush()
+
+        print(f"📥 Received and Quened: {payload.get('event_type')}")
+        
+        return jsonify({
+            "status": "success", 
+            "message": "Acknowledged by Condense Pipeline",
+            "event_id": payload.get('timestamp')
+        }), 200
+
+    except Exception as e:
+        print(f"🔥 Ingestion Error: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "healthy"}), 200
+
+if __name__ == "__main__":
+    # Run on port 8000 as per your Dockerfile reference
+    app.run(host='0.0.0.0', port=8000)
